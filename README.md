@@ -25,9 +25,13 @@ Secondary Target: `EasyR1/verl/rollout/vllm_rollout_spmd.py` Because if we need 
 
 ### Change in the `fsdp_worker.py`
 
- 
+1. Does not anything except`generate_sequence` method. 
 
+### Need to consider
 
+1. Please import the `ChartQAPrompt_mix_orig` and the `CodeExecutor` from the Refocus Folder. Incase there are import error. 
+
+2. The `_parse_tool_action` might need change.
 
 
 
@@ -35,13 +39,4 @@ Secondary Target: `EasyR1/verl/rollout/vllm_rollout_spmd.py` Because if we need 
 
 ## Data Loader Change
 
-
-
-
-
-
-
-
-
-## Re-encode the Edited Image via Vision Encoder
-
+Add the method that can reconize the json file from the Refocus. 

@@ -1,18 +1,23 @@
 data:
   # train_files: hiyouga/math12k@train
   # val_files: hiyouga/math12k@test
-  task: chartqa_h_bar_wbb 
+  # task: chartqa_h_bar_wbb 
+  #prompt_key: problem
+  #answer_key: answer
+  # image_key: images
+
+  # Here we need let EasyR1 know the path of the dataset, and the task is chartqa_h_bar_wbb - KaiZhuo Yan
   train_files: data/chartQA_h_bar_wbb.json  # Remember change Path - KaiZhuo Yan
   val_files:   data/chartQA_h_bar_wbb.json  # Remember change Path - KaiZhuo Yan
-  prompt_key: problem
+  prompt_key: puery 
   answer_key: answer
-  # image_key: images
-  image_key: figure_path      # Image 
+  image_key: figure_path                    # Remember change this to figure_path - KaiZhuo Yan
   max_prompt_length: 2048
   max_response_length: 2048
   rollout_batch_size: 512
   val_batch_size: 1024
-  format_prompt: ./examples/format_prompt/math_format.jinja
+  # 
+  format_prompt: ./examples/format_prompt/chatQA.jinja
   shuffle: true
   seed: 1
   max_pixels: 4194304
@@ -35,14 +40,14 @@ worker:
     padding_free: true
     ulysses_sequence_parallel_size: 1
     model:
-      model_path: Qwen/Qwen2.5-7B-Instruct
+      model_path: /home/exouser/Document/1_Model/Qwen2.5-VL-3B-Instruct
       enable_gradient_checkpointing: true
-      trust_remote_code: false
+      trust_remote_code: false          # true: use the model from HuggingFace, false: use the local model
       freeze_vision_tower: false
     optim:
       lr: 1.0e-6
       weight_decay: 1.0e-2
-      strategy: adamw  # {adamw, adamw_bf16}
+      strategy: adamw_bf16  # {adamw, adamw_bf16}
       lr_warmup_ratio: 0.0
     fsdp:
       enable_full_shard: true
@@ -53,19 +58,20 @@ worker:
       offload_optimizer: true  # true: more CPU memory; false: more GPU memory
 
   rollout:
-    n: 5
+    n: 1                              # Here I change to 1 just for testing
     temperature: 1.0
     top_p: 0.99
     gpu_memory_utilization: 0.6       # Here change the gpu_memory_utilization to 0.6 to solve the OOM issue - KaiZhuo Yan
     enforce_eager: false
     enable_chunked_prefill: false
     tensor_parallel_size: 2
-    limit_images: 0
+    limit_images: 1
     val_override_config:
       temperature: 0.5
       n: 1
 
   ref:
+    execution_once : true       # Already change in fsdp_worker - KaiZhuo Yan
     fsdp:
       enable_full_shard: true
       enable_cpu_offload: true  # true: more CPU memory; false: more GPU memory
@@ -75,13 +81,13 @@ worker:
 
   reward:
     reward_type: function
-    reward_function: ./examples/reward_function/math.py:compute_score
+    reward_function: ./examples/score_function/chartqa_reward.py:compute_score
 
 trainer:
   total_episodes: 15
   logger: ["console", "wandb"]
   project_name: VLMReasoning            # Please change this to your project name - KaiZhuo Yan
-  experiment_name: qwen2_5_7b_math_grpo
+  experiment_name: qwen2_5_vl_3b_chartqa_grpo
   n_gpus_per_node: 8
   nnodes: 1
   val_freq: 5  # -1 to disable

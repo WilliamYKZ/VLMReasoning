@@ -171,9 +171,8 @@ class RayPPOTrainer:
         config: PPOConfig,
         tokenizer: PreTrainedTokenizer,
         processor: Optional[ProcessorMixin],
-        #train_dataloader: StatefulDataLoader,
-        #val_dataloader: StatefulDataLoader,
-        env_factory: Type[Env],  # Using ChartQA environment - KaiZhuo Yan
+        train_dataloader: StatefulDataLoader,
+        val_dataloader: StatefulDataLoader,
         role_worker_mapping: dict[Role, Type[Worker]],
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: Type[RayWorkerGroup] = RayWorkerGroup,
@@ -184,7 +183,6 @@ class RayPPOTrainer:
         self.processor = processor
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
-        self.env_factory = env_factory  # Using ChartQA environment - KaiZhuo Yan  
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
@@ -329,20 +327,12 @@ class RayPPOTrainer:
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout  - Change to ChatQA
+        # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
-            '''actor_rollout_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.ActorRollout], config=self.config.worker, role="actor_rollout"
-            )'''
-            
             actor_rollout_cls = RayClassWithInitArgs(
-                cls=self,role_worker_mapping[Role.ActorRollout],
-                config=self.config.worker,
-                role="actor rollout",
-                env_factory=self,env_factory,
+                cls=self.role_worker_mapping[Role.ActorRollout], config=self.config.worker, role="actor_rollout"
             )
-
             self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
             raise NotImplementedError
@@ -462,266 +452,178 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    # def fit(self):
-    #     """
-    #     The training loop of PPO.
-    #     The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
-    #     The light-weight advantage computation is done on the driver process.
-    #     """
-    #     self.logger = Tracker(loggers=self.config.trainer.logger, config=self.config.to_dict())
-    #     self.global_step = 0
-    #     val_metrics: Optional[Dict[str, Any]] = None
-
-    #     # load checkpoint before doing anything
-    #     self._load_checkpoint()
-
-    #     # perform validation before training
-    #     # currently, we only support validation using the reward_function.
-    #     if self.val_reward_fn is not None and self.config.trainer.val_before_train:
-    #         val_metrics = self._validate()
-    #         self.logger.log(data=val_metrics, step=self.global_step)
-    #         if self.config.trainer.val_only:
-    #             return
-
-    #     for _ in tqdm(range(self.config.trainer.total_episodes), desc="Episode", position=0):
-    #         for batch_dict in tqdm(self.train_dataloader, desc="Running step", position=1):
-    #             self.global_step += 1
-    #             if self.global_step > self.training_steps:
-    #                 break
-
-    #             metrics, timing_raw = {}, {}
-    #             batch: DataProto = DataProto.from_single_dict(batch_dict)
-
-    #             # pop those keys for generation
-    #             if "multi_modal_data" in batch.non_tensor_batch.keys():
-    #                 gen_batch = batch.pop(
-    #                     batch_keys=["input_ids", "attention_mask", "position_ids"],
-    #                     non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
-    #                 )
-    #             else:
-    #                 gen_batch = batch.pop(
-    #                     batch_keys=["input_ids", "attention_mask", "position_ids"],
-    #                     non_tensor_batch_keys=["raw_prompt_ids"],
-    #                 )
-
-    #             with timer("step", timing_raw):
-    #                 # generate a batch
-    #                 with timer("gen", timing_raw):  # wg: worker group
-    #                     gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-
-    #                 if self.config.algorithm.adv_estimator == "remax":
-    #                     with timer("gen_max", timing_raw):
-    #                         gen_baseline_batch = deepcopy(gen_batch)
-    #                         gen_baseline_batch.meta_info["temperature"] = 0
-    #                         gen_baseline_batch.meta_info["n"] = 1
-    #                         gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-
-    #                         batch = batch.union(gen_baseline_output)
-    #                         reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(batch))
-    #                         reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
-
-    #                         batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
-    #                         batch.batch["reward_baselines"] = reward_baseline_tensor
-    #                         del gen_baseline_batch, gen_baseline_output
-
-    #                 batch.non_tensor_batch["uid"] = np.array(
-    #                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-    #                 )
-    #                 # repeat to align with repeated responses in rollout
-    #                 batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-    #                 batch = batch.union(gen_batch_output)
-    #                 batch.non_tensor_batch.pop("multi_modal_data", None)
-
-    #                 # balance the number of valid tokens on each dp rank.
-    #                 # Note that this breaks the order of data inside the batch.
-    #                 # Please take care when you implement group based adv computation such as GRPO and rloo
-    #                 self._balance_batch(batch, metrics=metrics)
-
-    #                 # compute global_valid tokens
-    #                 batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
-    #                 # compute reward
-    #                 with timer("reward", timing_raw):
-    #                     reward_ref = self.reward_fn.compute_reward.remote(batch)
-
-    #                 # recompute old_log_probs
-    #                 with timer("old", timing_raw):
-    #                     old_log_probs = self.actor_rollout_wg.compute_log_probs(batch)
-    #                     batch = batch.union(old_log_probs)
-
-    #                 # compute ref_log_probs
-    #                 if self.use_reference_policy:
-    #                     with timer("ref", timing_raw):
-    #                         ref_log_probs = self.ref_policy_wg.compute_ref_log_probs(batch)
-    #                         batch = batch.union(ref_log_probs)
-
-    #                 # compute values
-    #                 if self.use_critic:
-    #                     with timer("values", timing_raw):
-    #                         values = self.critic_wg.compute_values(batch)
-    #                         batch = batch.union(values)
-
-    #                 with timer("adv", timing_raw):
-    #                     # get token level scores
-    #                     reward_tensor, reward_metrics = ray.get(reward_ref)
-    #                     batch.batch["token_level_scores"] = reward_tensor
-    #                     reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
-    #                     metrics.update(reward_metrics)
-
-    #                     # apply kl penalty if available
-    #                     if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
-    #                         # apply kl penalty to reward
-    #                         batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
-    #                         metrics.update(kl_metrics)
-    #                     else:
-    #                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-    #                     # compute advantages, executed on the driver process
-    #                     batch = compute_advantage(
-    #                         batch,
-    #                         adv_estimator=self.config.algorithm.adv_estimator,
-    #                         gamma=self.config.algorithm.gamma,
-    #                         lam=self.config.algorithm.lam,
-    #                     )
-
-    #                 # update critic
-    #                 if self.use_critic:
-    #                     with timer("update_critic", timing_raw):
-    #                         critic_output = self.critic_wg.update_critic(batch)
-
-    #                     critic_metrics = reduce_metrics(critic_output.non_tensor_batch)
-    #                     metrics.update(critic_metrics)
-
-    #                 # update actor
-    #                 if self.config.trainer.critic_warmup <= self.global_step:
-    #                     with timer("update_actor", timing_raw):
-    #                         actor_output = self.actor_rollout_wg.update_actor(batch)
-
-    #                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
-    #                     metrics.update(actor_metrics)
-
-    #                 # validate
-    #                 if (
-    #                     self.val_reward_fn is not None
-    #                     and self.config.trainer.val_freq > 0
-    #                     and self.global_step % self.config.trainer.val_freq == 0
-    #                 ):
-    #                     with timer("validation", timing_raw):
-    #                         val_metrics = self._validate()
-
-    #                     metrics.update(val_metrics)
-
-    #                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
-    #                     with timer("save_checkpoint", timing_raw):
-    #                         self._save_checkpoint()
-
-    #             # collect metrics
-    #             num_gpus = self.resource_pool_manager.get_num_gpus()
-    #             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-    #             metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-    #             metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, num_gpus=num_gpus))
-
-    #             self.logger.log(data=metrics, step=self.global_step)
-
-
-    #     # perform validation after training
-    #     if self.val_reward_fn is not None:
-    #         if (
-    #             val_metrics is None
-    #             or self.config.trainer.val_freq <= 0
-    #             or self.global_step % self.config.trainer.val_freq != 0
-    #         ):
-    #             val_metrics = self._validate()
-    #             self.logger.log(data=val_metrics, step=self.global_step)
-
-    #         print(f"Final validation metrics: {convert_dict_to_str(val_metrics)}")
-
-    #     if self.config.trainer.save_freq <= 0 or self.global_step % self.config.trainer.save_freq != 0:
-    #         self._save_checkpoint()
-    
     def fit(self):
         """
-        Environment‐driven PPO training loop.
-        Each ActorRollout worker will:
-          1) run N episodes of ChartQAEnv,
-          2) return trajectories (obs, action, reward, next_obs, done),
-          3) and then apply policy and (optionally) critic updates.
-        The driver orchestrates these two steps per epoch.
+        The training loop of PPO.
+        The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
+        The light-weight advantage computation is done on the driver process.
         """
         self.logger = Tracker(loggers=self.config.trainer.logger, config=self.config.to_dict())
         self.global_step = 0
+        val_metrics: Optional[Dict[str, Any]] = None
 
-        # Initialize workers and any checkpoints
+        # load checkpoint before doing anything
         self._load_checkpoint()
-        self.init_workers()
 
-        # Validation before training (optional)
-        if self.val_reward_fn and self.config.trainer.val_before_train:
+        # perform validation before training
+        # currently, we only support validation using the reward_function.
+        if self.val_reward_fn is not None and self.config.trainer.val_before_train:
             val_metrics = self._validate()
             self.logger.log(data=val_metrics, step=self.global_step)
             if self.config.trainer.val_only:
                 return
 
-        # Number of total epochs
-        total_epochs = self.config.trainer.total_episodes
+        for _ in tqdm(range(self.config.trainer.total_episodes), desc="Episode", position=0):
+            for batch_dict in tqdm(self.train_dataloader, desc="Running step", position=1):
+                self.global_step += 1
+                if self.global_step > self.training_steps:
+                    break
 
-        for epoch in tqdm(range(total_epochs), desc="Epoch"):
-            # Phase 1: collect trajectories from rollout workers
-            # We broadcast an RPC to all actor_rollout workers:
-            # collect one episode each (or more, if you want faster batch)
-            num_eps_per_worker = 1
-            # This returns a dict: {worker_id: [Trajectory, ...], ...}
-            all_trajectories = ray.get([
-                self.actor_rollout_wg.collect_episodes.remote(num_eps_per_worker)
-                for _ in range(self.config.worker.rollout.n)
-            ])
-            # Flatten trajectories
-            trajectories = [traj for worker_list in all_trajectories for traj in worker_list]
+                metrics, timing_raw = {}, {}
+                batch: DataProto = DataProto.from_single_dict(batch_dict)
 
-            # Phase 2: learn from the collected trajectories
-            # Pass them back to the same workers for PPO update
-            update_futures = []
-            for traj in trajectories:
-                # Each worker applies update on its own traj
-                update_futures.append(self.actor_rollout_wg.learn_from.remote(traj))
-            updates = ray.get(update_futures)
+                # pop those keys for generation
+                if "multi_modal_data" in batch.non_tensor_batch.keys():
+                    gen_batch = batch.pop(
+                        batch_keys=["input_ids", "attention_mask", "position_ids"],
+                        non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
+                    )
+                else:
+                    gen_batch = batch.pop(
+                        batch_keys=["input_ids", "attention_mask", "position_ids"],
+                        non_tensor_batch_keys=["raw_prompt_ids"],
+                    )
 
-            # Aggregate metrics across workers
-            metrics = defaultdict(list)
-            for m in updates:
-                for k, v in m.items():
-                    metrics[k].append(v)
-            # Reduce metrics (mean)
-            metrics = {k: float(np.mean(vs)) for k, vs in metrics.items()}
+                with timer("step", timing_raw):
+                    # generate a batch
+                    with timer("gen", timing_raw):  # wg: worker group
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
-            self.global_step += 1
+                    if self.config.algorithm.adv_estimator == "remax":
+                        with timer("gen_max", timing_raw):
+                            gen_baseline_batch = deepcopy(gen_batch)
+                            gen_baseline_batch.meta_info["temperature"] = 0
+                            gen_baseline_batch.meta_info["n"] = 1
+                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
-            # Optional: run critic updates if using GAE
-            if self.use_critic and self.global_step > self.config.trainer.critic_warmup:
-                critic_futures = [
-                    self.critic_wg.update_critic.remote(traj) for traj in trajectories
-                ]
-                critic_updates = ray.get(critic_futures)
-                # merge critic metrics similarly
-                for mu in critic_updates:
-                    for k, v in mu.items():
-                        metrics.setdefault(f"critic/{k}", []).append(v)
-                metrics.update({k: float(np.mean(vs)) for k, vs in metrics.items() if isinstance(vs, list)})
+                            batch = batch.union(gen_baseline_output)
+                            reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(batch))
+                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
-            # Periodic validation and checkpointing
-            if self.val_reward_fn and (epoch + 1) % self.config.trainer.val_freq == 0:
+                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                            batch.batch["reward_baselines"] = reward_baseline_tensor
+                            del gen_baseline_batch, gen_baseline_output
+
+                    batch.non_tensor_batch["uid"] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                    )
+                    # repeat to align with repeated responses in rollout
+                    batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+                    batch = batch.union(gen_batch_output)
+                    batch.non_tensor_batch.pop("multi_modal_data", None)
+
+                    # balance the number of valid tokens on each dp rank.
+                    # Note that this breaks the order of data inside the batch.
+                    # Please take care when you implement group based adv computation such as GRPO and rloo
+                    self._balance_batch(batch, metrics=metrics)
+
+                    # compute global_valid tokens
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+
+                    # compute reward
+                    with timer("reward", timing_raw):
+                        reward_ref = self.reward_fn.compute_reward.remote(batch)
+
+                    # recompute old_log_probs
+                    with timer("old", timing_raw):
+                        old_log_probs = self.actor_rollout_wg.compute_log_probs(batch)
+                        batch = batch.union(old_log_probs)
+
+                    # compute ref_log_probs
+                    if self.use_reference_policy:
+                        with timer("ref", timing_raw):
+                            ref_log_probs = self.ref_policy_wg.compute_ref_log_probs(batch)
+                            batch = batch.union(ref_log_probs)
+
+                    # compute values
+                    if self.use_critic:
+                        with timer("values", timing_raw):
+                            values = self.critic_wg.compute_values(batch)
+                            batch = batch.union(values)
+
+                    with timer("adv", timing_raw):
+                        # get token level scores
+                        reward_tensor, reward_metrics = ray.get(reward_ref)
+                        batch.batch["token_level_scores"] = reward_tensor
+                        reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
+                        metrics.update(reward_metrics)
+
+                        # apply kl penalty if available
+                        if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
+                            # apply kl penalty to reward
+                            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
+                            metrics.update(kl_metrics)
+                        else:
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                        # compute advantages, executed on the driver process
+                        batch = compute_advantage(
+                            batch,
+                            adv_estimator=self.config.algorithm.adv_estimator,
+                            gamma=self.config.algorithm.gamma,
+                            lam=self.config.algorithm.lam,
+                        )
+
+                    # update critic
+                    if self.use_critic:
+                        with timer("update_critic", timing_raw):
+                            critic_output = self.critic_wg.update_critic(batch)
+
+                        critic_metrics = reduce_metrics(critic_output.non_tensor_batch)
+                        metrics.update(critic_metrics)
+
+                    # update actor
+                    if self.config.trainer.critic_warmup <= self.global_step:
+                        with timer("update_actor", timing_raw):
+                            actor_output = self.actor_rollout_wg.update_actor(batch)
+
+                        actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
+                        metrics.update(actor_metrics)
+
+                    # validate
+                    if (
+                        self.val_reward_fn is not None
+                        and self.config.trainer.val_freq > 0
+                        and self.global_step % self.config.trainer.val_freq == 0
+                    ):
+                        with timer("validation", timing_raw):
+                            val_metrics = self._validate()
+
+                        metrics.update(val_metrics)
+
+                    if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
+                        with timer("save_checkpoint", timing_raw):
+                            self._save_checkpoint()
+
+                # collect metrics
+                num_gpus = self.resource_pool_manager.get_num_gpus()
+                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, num_gpus=num_gpus))
+
+                self.logger.log(data=metrics, step=self.global_step)
+
+        # perform validation after training
+        if self.val_reward_fn is not None:
+            if (
+                val_metrics is None
+                or self.config.trainer.val_freq <= 0
+                or self.global_step % self.config.trainer.val_freq != 0
+            ):
                 val_metrics = self._validate()
-                metrics.update(val_metrics)
-            if self.config.trainer.save_freq > 0 and (epoch + 1) % self.config.trainer.save_freq == 0:
-                self._save_checkpoint()
+                self.logger.log(data=val_metrics, step=self.global_step)
 
-            # Logging
-            metrics.update({
-                "epoch": epoch + 1,
-                "global_step": self.global_step,
-            })
-            self.logger.log(data=metrics, step=self.global_step)
+            print(f"Final validation metrics: {convert_dict_to_str(val_metrics)}")
 
-        # Final checkpoint
-        self._save_checkpoint()
-
+        if self.config.trainer.save_freq <= 0 or self.global_step % self.config.trainer.save_freq != 0:
+            self._save_checkpoint()

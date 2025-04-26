@@ -60,6 +60,11 @@ from .sharding_manager import FSDPVLLMShardingManager
 from .sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 
+# New Imports for Refocus Integration please import those file in the Refocus folder. - KaiZhuo Yan
+from prompt_need import ChartQAPrompt_mix_orig
+from execution import CodeExecutor
+
+
 class FSDPWorker(Worker):
     def __init__(
         self,
@@ -490,6 +495,42 @@ class FSDPWorker(Worker):
             else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
+        
+        # Single-Step Refocus chain-of-thought execution - KaiZhuo Yan
+        if getattr(self.config, 'ref', None) and self.config.ref.get('execute_once', False):
+            # Instantiate prompt generator and executor
+            prompt_gen = ChartQAPrompt_mix_orig()
+            executor = CodeExecutor(working_dir = None)
+            
+            # Generate the Refocus prompt using metadata - KaiZhuo Yan
+            ref_prompt = prompt_gen.initial_prompt(prompts.non_tensor_batch, n_image=1)
+            
+            # Execute the LLM call to get the tool-invocation code - KaiZhuo Yan
+            ref_output = self.rollout.generate_sequences(prompts=DataProto(non_tensor_batch=ref_prompt, meta_info=meta_info))
+            
+            # Parse and Extract the ACTION code snippet 
+            action_code = self._parse_tool_action(ref_output)
+            
+            # Execute the tool action to produce a focused image - KaiZhuo Yan
+            executor.execute(action_code)
+            focused_image = executor.get_last_output_image()
+            
+            # Re-encode by using the vision encoder - KaiZhuo Yan
+            image_tensor = self.processor.feature_extractor(focused_image, return_tensors='pt')['pixel_values'].to(self.fsdp_module.device)
+            vision_feats = self.fsdp_module.visual.forward(image_tensor)
+            
+            # Inject edited embeddings into the prompts for the main rollout - KaiZhuo Yan
+            prompts.tensor_batch['vision_feats'] = vision_feats.squeeze(0)
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
         with self.rollout_sharding_manager:
             # after parameters sync with rollout, offload actor model to CPU
             if self._use_param_offload:
@@ -504,6 +545,10 @@ class FSDPWorker(Worker):
 
         output = output.to("cpu")
         return output
+
+    def _parse_tool_action(self, ref_output):
+        # Placeholder for parsing logic from the model's output.
+        return ref_output.non_tensor_batch.get('action_code', ref_output.non_tensor_batch)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_probs(self, data: DataProto):
